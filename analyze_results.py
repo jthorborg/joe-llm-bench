@@ -136,10 +136,13 @@ def print_detailed_comparison(results: list):
     
     for i, result in enumerate(results):
         filename = result.get("_filename", f"Run {i+1}")
-        timestamp = result.get("_timestamp", "")
-        model = result.get("model", "Unknown")
-        
-        print(f"\n--- {filename} (Model: {model}) ---")
+        model = result.get("model", {})
+        if isinstance(model, dict):
+            model_label = model.get("model_alias", "unknown")
+        else:
+            model_label = str(model)
+
+        print(f"\n--- {filename} (Model: {model_label}) ---")
         
         # Prefill metrics
         prefill_stats = result.get("prefill", {}).get("results", [])

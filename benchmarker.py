@@ -28,6 +28,19 @@ class LlamaBenchmarker:
         self.model_name = model_name
         self.completion_endpoint = f"{self.server_url}/completion"
     
+    def fetch_model_info(self) -> Dict[str, str]:
+        """Fetch model alias and path from the server's /props endpoint."""
+        try:
+            response = requests.get(f"{self.server_url}/props", timeout=10)
+            response.raise_for_status()
+            props = response.json()
+            return {
+                "model_alias": props.get("model_alias", "unknown"),
+                "model_path": props.get("model_path", "unknown"),
+            }
+        except Exception as e:
+            return {"model_alias": self.model_name, "model_path": "unknown", "error": str(e)}
+
     def count_tokens(self, text: str) -> int:
         """Count tokens in text using tiktoken (cl100k_base encoding)."""
         try:
@@ -111,16 +124,22 @@ class LlamaBenchmarker:
         
         # Calculate metrics
         if "error" not in response:
-            # Check if timing info is available in response
-            prefill_time = response.get("timings", {}).get("prompt_ms", elapsed * 1000) / 1000
+            prefill_time   = response.get("timings", {}).get("prompt_ms", elapsed * 1000) / 1000
             prefill_tokens = response.get("timings", {}).get("prompt_n", prompt_tokens)
-            
-            # Calculate tokens per second
-            if prefill_time > 0:
-                tokens_per_second = prefill_tokens / prefill_time
-            else:
-                tokens_per_second = 0
-            
+
+            # Detect KV cache hit: server only processed a tiny fraction of the prompt
+            # (typically reports prompt_n=1 when the full prompt was already cached)
+            if prefill_tokens < max(2, prompt_tokens * 0.1):
+                return {
+                    "status": "cache_hit",
+                    "prompt_tokens": prefill_tokens,
+                    "prefill_time_seconds": prefill_time,
+                    "tokens_per_second": 0,
+                    "error": f"KV cache hit — server reused prior result (reported {prefill_tokens} tokens processed)"
+                }
+
+            tokens_per_second = prefill_tokens / prefill_time if prefill_time > 0 else 0
+
             return {
                 "status": "success",
                 "prompt_tokens": prefill_tokens,
@@ -141,7 +160,8 @@ class LlamaBenchmarker:
         self,
         prompt: str,
         temperature: float = 0.7,
-        stop: str = "### END"
+        stop: str = "### END",
+        n_predict: int = 200
     ) -> Dict[str, Any]:
         """
         Measure output generation speed (TTFT and throughput).
@@ -163,6 +183,7 @@ class LlamaBenchmarker:
         
         response = self.send_completion_request(
             prompt,
+            n_predict=n_predict,
             temperature=temperature,
             stop=stop
         )
@@ -225,28 +246,29 @@ class LlamaBenchmarker:
         iterations: int = 3,
         temperature: float = 0.7
     ) -> Dict[str, Any]:
-        """
-        Run prefill benchmark with multiple iterations.
-        
-        Args:
-            prompt: The input prompt
-            iterations: Number of times to run the test
-            temperature: Sampling temperature
-        
-        Returns:
-            Dictionary with statistics and individual results
-        """
         results = []
-        
+
         for i in range(iterations):
+            print(f"    iteration {i+1}/{iterations}...", end=" ", flush=True)
+            t0 = time.time()
             result = self.measure_prefill(prompt, temperature)
+            elapsed = time.time() - t0
             result["iteration"] = i + 1
             results.append(result)
-        
-        # Calculate statistics
-        times = [r["prefill_time_seconds"] for r in results if r["status"] == "success"]
-        tokens_per_sec = [r["tokens_per_second"] for r in results if r["status"] == "success"]
-        
+            if result["status"] == "success":
+                status = f"{result['tokens_per_second']:.1f} tok/s"
+            elif result["status"] == "cache_hit":
+                status = "cache hit (skipped)"
+            else:
+                status = result["error"]
+            print(f"done ({elapsed:.1f}s) — {status}", flush=True)
+
+        # Statistics exclude cache hits
+        valid = [r for r in results if r["status"] == "success"]
+        times = [r["prefill_time_seconds"] for r in valid]
+        tokens_per_sec = [r["tokens_per_second"] for r in valid]
+        cache_hits = sum(1 for r in results if r["status"] == "cache_hit")
+
         if times:
             stats = {
                 "mean_time_seconds": sum(times) / len(times),
@@ -256,7 +278,8 @@ class LlamaBenchmarker:
                 "min_tokens_per_second": min(tokens_per_sec),
                 "max_tokens_per_second": max(tokens_per_sec),
                 "iterations": len(results),
-                "successful_iterations": sum(1 for r in results if r["status"] == "success")
+                "successful_iterations": len(valid),
+                "cache_hits": cache_hits
             }
         else:
             stats = {
@@ -267,7 +290,8 @@ class LlamaBenchmarker:
                 "min_tokens_per_second": 0,
                 "max_tokens_per_second": 0,
                 "iterations": len(results),
-                "successful_iterations": 0
+                "successful_iterations": 0,
+                "cache_hits": cache_hits
             }
         
         return {
@@ -284,26 +308,20 @@ class LlamaBenchmarker:
         prompt: str,
         iterations: int = 3,
         temperature: float = 0.7,
-        stop: str = "### END"
+        stop: str = "### END",
+        n_predict: int = 200
     ) -> Dict[str, Any]:
-        """
-        Run output generation benchmark with multiple iterations.
-        
-        Args:
-            prompt: The input prompt
-            iterations: Number of times to run the test
-            temperature: Sampling temperature
-            stop: Stop sequence for termination
-        
-        Returns:
-            Dictionary with statistics and individual results
-        """
         results = []
-        
+
         for i in range(iterations):
-            result = self.measure_output_generation(prompt, temperature, stop)
+            print(f"    iteration {i+1}/{iterations}...", end=" ", flush=True)
+            t0 = time.time()
+            result = self.measure_output_generation(prompt, temperature, stop, n_predict)
+            elapsed = time.time() - t0
             result["iteration"] = i + 1
             results.append(result)
+            status = f"{result['tokens_per_second']:.1f} tok/s ({result['generated_tokens']} tokens)" if result["status"] == "success" else result["error"]
+            print(f"done ({elapsed:.1f}s) — {status}", flush=True)
         
         # Calculate statistics
         ttft_times = [r["time_to_first_token_seconds"] for r in results if r["status"] == "success"]

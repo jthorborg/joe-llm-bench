@@ -1,0 +1,31 @@
+# Test Data - Code
+
+## Short (~100 tokens)
+```python
+def hello_world():
+    """Print a greeting message."""
+    print("Hello, World!")
+    return True
+
+if __name__ == "__main__":
+    hello_world()
+```
+
+## Five K (~5000 tokens)
+[Large Python file with comments - would be generated programmatically]
+
+This file would contain a full Python module with:
+- Multiple classes
+- Functions with docstrings
+- Imports and dependencies
+- Type hints
+- Comments throughout
+
+## Fifty K (~50000 tokens)
+[Very large Python file - would be generated programmatically]
+
+This file would contain an entire project with:
+- Multiple modules
+- Complex class hierarchies
+- Comprehensive documentation
+- Example usage
